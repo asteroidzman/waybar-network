@@ -129,15 +129,17 @@ static void update_bar(Inst *self) {
 // ─── nmcli state fetch (async) ───────────────────────────────────────────────
 typedef struct { Inst *self; GCancellable *cancel; } SCtx;
 static void parse_state(Inst *self, const char *out) {
-  // format: type|ssid|signal|ip|dev
+  // format: type|ssid|signal|ip|dev — split preserving empty fields (strtok_r
+  // would collapse the empty ssid/signal on ethernet and shift ip/dev off).
   char buf[512]; g_strlcpy(buf, out, sizeof buf); g_strchomp(buf);
-  char *f[5] = {0}, *save = NULL, *tok = strtok_r(buf, "|", &save);
-  for (int i = 0; i < 5 && tok; i++) { f[i] = tok; tok = strtok_r(NULL, "|", &save); }
-  g_strlcpy(self->type, f[0] ? f[0] : "", sizeof self->type);
-  g_strlcpy(self->ssid, f[1] ? f[1] : "", sizeof self->ssid);
-  self->signal = f[2] && *f[2] ? atoi(f[2]) : -1;
-  g_strlcpy(self->ip, f[3] ? f[3] : "", sizeof self->ip);
-  g_strlcpy(self->dev, f[4] ? f[4] : "", sizeof self->dev);
+  char **f = g_strsplit(buf, "|", 5);
+  guint n = g_strv_length(f);
+  g_strlcpy(self->type, n > 0 ? f[0] : "", sizeof self->type);
+  g_strlcpy(self->ssid, n > 1 ? f[1] : "", sizeof self->ssid);
+  self->signal = (n > 2 && *f[2]) ? atoi(f[2]) : -1;
+  g_strlcpy(self->ip, n > 3 ? f[3] : "", sizeof self->ip);
+  g_strlcpy(self->dev, n > 4 ? f[4] : "", sizeof self->dev);
+  g_strfreev(f);
   read_throughput(self);
   update_bar(self);
 }
