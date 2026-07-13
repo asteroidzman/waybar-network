@@ -34,11 +34,38 @@ static const char *wifi_icon_name(int sig) {
   if (sig < 67) return "wifi2.svg";
   return "wifi3.svg";
 }
+// Load an SVG and recolour it to the widget's theme colour (a white/alpha
+// silhouette → the CSS `color`, so icons follow matugen like the old glyphs did).
+static GdkPixbuf *themed_pixbuf(GtkWidget *w, const char *dir, int size, const char *name) {
+  char *p = g_build_filename(dir, name, NULL);
+  GdkPixbuf *src = gdk_pixbuf_new_from_file_at_size(p, size, size, NULL);
+  g_free(p);
+  if (!src) return NULL;
+  GdkPixbuf *d = gdk_pixbuf_get_has_alpha(src) ? gdk_pixbuf_copy(src)
+                                               : gdk_pixbuf_add_alpha(src, FALSE, 0, 0, 0);
+  g_object_unref(src);
+  GdkRGBA c; GtkStyleContext *sc = gtk_widget_get_style_context(w);
+  gtk_style_context_get_color(sc, gtk_style_context_get_state(sc), &c);
+  guchar R = (guchar)(c.red*255), G = (guchar)(c.green*255), B = (guchar)(c.blue*255);
+  int wd = gdk_pixbuf_get_width(d), h = gdk_pixbuf_get_height(d);
+  int rs = gdk_pixbuf_get_rowstride(d), nc = gdk_pixbuf_get_n_channels(d);
+  guchar *px = gdk_pixbuf_get_pixels(d);
+  for (int y = 0; y < h; y++) for (int x = 0; x < wd; x++) {
+    guchar *q = px + y*rs + x*nc; q[0]=R; q[1]=G; q[2]=B;
+    if (nc == 4) q[3] = (guchar)(q[3]*c.alpha);
+  }
+  return d;
+}
+static void icon_restyle(GtkWidget *img, gpointer data) {
+  Inst *self = data;
+  const char *name = g_object_get_data(G_OBJECT(img), "svg");
+  if (!name) return;
+  GdkPixbuf *pb = themed_pixbuf(img, self->icon_dir, self->icon_size, name);
+  if (pb) { gtk_image_set_from_pixbuf(GTK_IMAGE(img), pb); g_object_unref(pb); }
+}
 static void set_bar_icon(Inst *self, const char *name) {
-  char *path = g_build_filename(self->icon_dir, name, NULL);
-  GdkPixbuf *pb = gdk_pixbuf_new_from_file_at_size(path, self->icon_size, self->icon_size, NULL);
-  g_free(path);
-  if (pb) { gtk_image_set_from_pixbuf(GTK_IMAGE(self->icon), pb); g_object_unref(pb); }
+  g_object_set_data_full(G_OBJECT(self->icon), "svg", g_strdup(name), g_free);
+  icon_restyle(self->icon, self);
 }
 
 static const char *wifi_glyph(int sig) {
@@ -320,6 +347,7 @@ void *wbcffi_init(const wbcffi_init_info *info, const wbcffi_config_entry *entri
   self->icon = gtk_image_new();
   gtk_widget_set_valign(self->icon, GTK_ALIGN_CENTER);
   gtk_style_context_add_class(gtk_widget_get_style_context(self->icon), "nw-icon");
+  g_signal_connect(self->icon, "style-updated", G_CALLBACK(icon_restyle), self);
   set_bar_icon(self, "disconnected.svg");
   self->label = mklabel("", "nw-label");
   gtk_box_pack_start(GTK_BOX(h), self->icon, FALSE, FALSE, 0);
