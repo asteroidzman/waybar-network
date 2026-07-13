@@ -39,6 +39,11 @@ make install                 # → ~/.local/lib/waybar/libnetwork.so
 |-----|---------|---------|
 | `module_path` | *(required)* | path to `libnetwork.so` |
 | `interval` | 3 | state/throughput refresh seconds |
+| `icon-size` | 26 | bar icon pixel size |
+| `icon-dir` | `$XDG_DATA_HOME/waybar-network` | dir holding the wifi/ethernet SVGs (installed by `make install`) |
+
+The bar shows crafted image icons: signal-graded wifi (`wifi1`–`wifi3`), an
+ethernet plug, and a disconnected state.
 
 ## style.css
 

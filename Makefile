@@ -4,13 +4,15 @@ CFLAGS  ?= -O2 -Wall -Wextra
 CFLAGS  += -fPIC $(shell pkg-config --cflags $(PKGS))
 LDLIBS  += $(shell pkg-config --libs $(PKGS)) -lm
 PREFIX  ?= $(HOME)/.local/lib/waybar
+DATADIR ?= $(HOME)/.local/share/waybar-network
 
 $(PLUGIN): src/network.c
 	$(CC) $(CFLAGS) -shared -o $@ $< $(LDLIBS)
 
 install: $(PLUGIN)
 	install -Dm755 $(PLUGIN) $(PREFIX)/$(PLUGIN)
-	@echo "installed to $(PREFIX)/$(PLUGIN)"
+	install -Dm644 -t $(DATADIR) assets/wifi1.svg assets/wifi2.svg assets/wifi3.svg assets/ethernet.svg assets/disconnected.svg
+	@echo "installed to $(PREFIX)/$(PLUGIN) + icons in $(DATADIR)"
 
 clean:
 	rm -f $(PLUGIN)
