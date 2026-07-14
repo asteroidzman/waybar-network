@@ -6,6 +6,7 @@
 //  - State via nmcli; throughput from /proc/net/dev. Refreshed every 3s.
 #define _GNU_SOURCE
 #include <gtk/gtk.h>
+#include <gtk-layer-shell.h>
 #include <gdk/gdkkeysyms.h>
 #include <gio/gio.h>
 #include <stdio.h>
@@ -222,6 +223,15 @@ static gboolean on_pop_key(GtkWidget *w, GdkEventKey *e, gpointer d) {
   (void)d; if (e->keyval == GDK_KEY_Escape) { gtk_popover_popdown(GTK_POPOVER(w)); return TRUE; }
   return FALSE;
 }
+// Grant the bar's layer surface on-demand keyboard focus while a popover is open,
+// so Escape reaches it and the modal grab dismisses on click-outside; release on close.
+static void pop_kb(GtkWidget *ref, gboolean on) {
+  GtkWidget *top = gtk_widget_get_toplevel(ref);
+  if (GTK_IS_WINDOW(top) && gtk_layer_is_layer_window(GTK_WINDOW(top)))
+    gtk_layer_set_keyboard_mode(GTK_WINDOW(top),
+      on ? GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND : GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+}
+static void on_pop_closed(GtkWidget *pop, gpointer data) { (void)pop; pop_kb(GTK_WIDGET(data), FALSE); }
 static GtkWidget *info_row(const char *k, const char *v) {
   GtkWidget *r = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *kl = gtk_label_new(k); gtk_widget_set_halign(kl, GTK_ALIGN_START);
@@ -316,6 +326,7 @@ static gboolean on_click(GtkWidget *w, GdkEventButton *ev, gpointer data) {
   (void)w; if (ev->button != 1) return FALSE;
   Inst *self = data; self->pw_ssid[0] = 0;
   fetch_state(self); rebuild_popover(self);
+  pop_kb(self->box, TRUE);
   gtk_popover_popup(GTK_POPOVER(self->popover));
   gtk_widget_grab_focus(self->popover);
   return TRUE;
@@ -361,6 +372,7 @@ void *wbcffi_init(const wbcffi_init_info *info, const wbcffi_config_entry *entri
   gtk_popover_set_modal(GTK_POPOVER(self->popover), TRUE);
   gtk_widget_add_events(self->popover, GDK_KEY_PRESS_MASK);
   g_signal_connect(self->popover, "key-press-event", G_CALLBACK(on_pop_key), NULL);
+  g_signal_connect(self->popover, "closed", G_CALLBACK(on_pop_closed), self->box);
   g_signal_connect(self->box, "button-press-event", G_CALLBACK(on_click), self);
   gtk_container_add(root, self->box);
   gtk_widget_show_all(GTK_WIDGET(root));

@@ -1,5 +1,5 @@
 PLUGIN  := libnetwork.so
-PKGS    := gtk+-3.0 gio-2.0 gio-unix-2.0
+PKGS    := gtk+-3.0 gio-2.0 gio-unix-2.0 gtk-layer-shell-0
 CFLAGS  ?= -O2 -Wall -Wextra
 CFLAGS  += -fPIC $(shell pkg-config --cflags $(PKGS))
 LDLIBS  += $(shell pkg-config --libs $(PKGS)) -lm
