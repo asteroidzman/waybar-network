@@ -28,6 +28,7 @@ typedef struct {
   int interval; guint timer; GCancellable *cancel;
   GtkWidget *pw_entry, *pw_row; char pw_ssid[128];
   char *icon_dir; int icon_size;
+  int pill_x, pill_w, armed;
 } Inst;
 
 static const char *wifi_icon_name(int sig) {
@@ -219,19 +220,50 @@ static void on_wifi_toggle(GtkButton *b, gpointer d) {
 }
 
 // ─── popover ─────────────────────────────────────────────────────────────────
+static void rebuild_popover(Inst *self);   // fwd
+// Content-sized layer-shell window popup (blurred via the waybar-popup namespace).
+// Opens under the pill with on-demand keyboard focus; closes on focus-loss
+// (focus-follows-mouse: pointer moves to another surface) or Escape.
+static void pop_hide(Inst *self) { gtk_widget_hide(self->popover); }
+static gboolean arm_cb(gpointer d) { ((Inst *)d)->armed = 1; return G_SOURCE_REMOVE; }
 static gboolean on_pop_key(GtkWidget *w, GdkEventKey *e, gpointer d) {
-  (void)d; if (e->keyval == GDK_KEY_Escape) { gtk_popover_popdown(GTK_POPOVER(w)); return TRUE; }
+  (void)w; Inst *self = d;
+  if (e->keyval == GDK_KEY_Escape) { pop_hide(self); return TRUE; }
   return FALSE;
 }
-// Grant the bar's layer surface on-demand keyboard focus while a popover is open,
-// so Escape reaches it and the modal grab dismisses on click-outside; release on close.
-static void pop_kb(GtkWidget *ref, gboolean on) {
-  GtkWidget *top = gtk_widget_get_toplevel(ref);
-  if (GTK_IS_WINDOW(top) && gtk_layer_is_layer_window(GTK_WINDOW(top)))
-    gtk_layer_set_keyboard_mode(GTK_WINDOW(top),
-      on ? GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND : GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+static void on_pop_focus(GObject *win, GParamSpec *ps, gpointer d) {
+  (void)ps; Inst *self = d;
+  if (self->armed && gtk_widget_get_visible(self->popover) &&
+      !gtk_window_has_toplevel_focus(GTK_WINDOW(win)))
+    pop_hide(self);
 }
-static void on_pop_closed(GtkWidget *pop, gpointer data) { (void)pop; pop_kb(GTK_WIDGET(data), FALSE); }
+static gboolean recenter(gpointer d) {
+  Inst *self = d;
+  int w = gtk_widget_get_allocated_width(self->popover);
+  int mx = self->pill_x + self->pill_w / 2 - w / 2;
+  if (mx < 4) mx = 4;
+  gtk_layer_set_margin(GTK_WINDOW(self->popover), GTK_LAYER_SHELL_EDGE_LEFT, mx);
+  return G_SOURCE_REMOVE;
+}
+static void pop_show(Inst *self) {
+  rebuild_popover(self);
+  GtkWidget *top = gtk_widget_get_toplevel(self->box);
+  int x = 0, y = 0, yb = 0, dummy = 0;
+  if (GTK_IS_WIDGET(top)) {
+    gtk_widget_translate_coordinates(self->box, top, 0, 0, &x, &y);
+    gtk_widget_translate_coordinates(self->box, top, 0,
+                                     gtk_widget_get_allocated_height(self->box), &dummy, &yb);
+  }
+  self->pill_x = x;
+  self->pill_w = gtk_widget_get_allocated_width(self->box);
+  gtk_layer_set_margin(GTK_WINDOW(self->popover), GTK_LAYER_SHELL_EDGE_LEFT, x > 4 ? x : 4);
+  gtk_layer_set_margin(GTK_WINDOW(self->popover), GTK_LAYER_SHELL_EDGE_TOP, yb > 0 ? yb + 2 : 60);
+  self->armed = 0;
+  gtk_widget_show_all(self->popover);
+  gtk_widget_grab_focus(self->popover);
+  g_timeout_add(250, arm_cb, self);
+  g_idle_add(recenter, self);
+}
 static GtkWidget *info_row(const char *k, const char *v) {
   GtkWidget *r = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *kl = gtk_label_new(k); gtk_widget_set_halign(kl, GTK_ALIGN_START);
@@ -325,10 +357,7 @@ static void rebuild_popover(Inst *self) {
 static gboolean on_click(GtkWidget *w, GdkEventButton *ev, gpointer data) {
   (void)w; if (ev->button != 1) return FALSE;
   Inst *self = data; self->pw_ssid[0] = 0;
-  fetch_state(self); rebuild_popover(self);
-  pop_kb(self->box, TRUE);
-  gtk_popover_popup(GTK_POPOVER(self->popover));
-  gtk_widget_grab_focus(self->popover);
+  fetch_state(self); if (gtk_widget_get_visible(self->popover)) pop_hide(self); else pop_show(self);
   return TRUE;
 }
 static gboolean tick(gpointer data) { fetch_state(data); return G_SOURCE_CONTINUE; }
@@ -366,13 +395,20 @@ void *wbcffi_init(const wbcffi_init_info *info, const wbcffi_config_entry *entri
   gtk_box_pack_start(GTK_BOX(h), self->icon, FALSE, FALSE, 0);
   gtk_box_pack_start(GTK_BOX(h), self->label, FALSE, FALSE, 0);
   gtk_container_add(GTK_CONTAINER(self->box), h);
-  self->popover = gtk_popover_new(self->box);
-  gtk_popover_set_position(GTK_POPOVER(self->popover), GTK_POS_BOTTOM);
-  gtk_popover_set_constrain_to(GTK_POPOVER(self->popover), GTK_POPOVER_CONSTRAINT_NONE);
-  gtk_popover_set_modal(GTK_POPOVER(self->popover), TRUE);
+  self->popover = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+  gtk_widget_set_name(self->popover, "cffi-popwin");
+  { GdkVisual *rgba = gdk_screen_get_rgba_visual(gtk_widget_get_screen(self->popover));
+    if (rgba) gtk_widget_set_visual(self->popover, rgba); }
+  gtk_layer_init_for_window(GTK_WINDOW(self->popover));
+  gtk_layer_set_namespace(GTK_WINDOW(self->popover), "waybar-popup");
+  gtk_layer_set_layer(GTK_WINDOW(self->popover), GTK_LAYER_SHELL_LAYER_TOP);
+  gtk_layer_set_anchor(GTK_WINDOW(self->popover), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+  gtk_layer_set_anchor(GTK_WINDOW(self->popover), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+  gtk_layer_set_exclusive_zone(GTK_WINDOW(self->popover), -1);
+  gtk_layer_set_keyboard_mode(GTK_WINDOW(self->popover), GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
   gtk_widget_add_events(self->popover, GDK_KEY_PRESS_MASK);
-  g_signal_connect(self->popover, "key-press-event", G_CALLBACK(on_pop_key), NULL);
-  g_signal_connect(self->popover, "closed", G_CALLBACK(on_pop_closed), self->box);
+  g_signal_connect(self->popover, "key-press-event", G_CALLBACK(on_pop_key), self);
+  g_signal_connect(self->popover, "notify::has-toplevel-focus", G_CALLBACK(on_pop_focus), self);
   g_signal_connect(self->box, "button-press-event", G_CALLBACK(on_click), self);
   gtk_container_add(root, self->box);
   gtk_widget_show_all(GTK_WIDGET(root));
