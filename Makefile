@@ -15,6 +15,12 @@ install: $(PLUGIN)
 	install -Dm644 -t $(DATADIR) assets/wifi1.svg assets/wifi2.svg assets/wifi3.svg assets/ethernet.svg assets/disconnected.svg
 	@echo "installed to $(PREFIX)/$(PLUGIN) + icons in $(DATADIR)"
 
+test_network: tests/test_network.c src/network.c $(WBCOMMON)/wbcommon.h
+	$(CC) $(CFLAGS) -o $@ tests/test_network.c $(LDLIBS)
+
+test: test_network
+	./test_network
+
 clean:
-	rm -f $(PLUGIN)
-.PHONY: install clean
+	rm -f $(PLUGIN) test_network
+.PHONY: install clean test
