@@ -6,14 +6,15 @@ CFLAGS  += -fPIC -I$(WBCOMMON) $(shell pkg-config --cflags $(PKGS))
 LDLIBS  += $(shell pkg-config --libs $(PKGS)) -lm
 PREFIX  ?= $(HOME)/.local/lib/waybar
 DATADIR ?= $(HOME)/.local/share/waybar-network
+DESTDIR ?=
 
 $(PLUGIN): src/network.c $(WBCOMMON)/wbcommon.h
 	$(CC) $(CFLAGS) -shared -o $@ $< $(LDLIBS)
 
 install: $(PLUGIN)
-	install -Dm755 $(PLUGIN) $(PREFIX)/$(PLUGIN)
-	install -Dm644 -t $(DATADIR) assets/wifi1.svg assets/wifi2.svg assets/wifi3.svg assets/ethernet.svg assets/disconnected.svg
-	@echo "installed to $(PREFIX)/$(PLUGIN) + icons in $(DATADIR)"
+	install -Dm755 $(PLUGIN) $(DESTDIR)$(PREFIX)/$(PLUGIN)
+	install -Dm644 -t $(DESTDIR)$(DATADIR) assets/wifi1.svg assets/wifi2.svg assets/wifi3.svg assets/ethernet.svg assets/disconnected.svg
+	@echo "installed to $(DESTDIR)$(PREFIX)/$(PLUGIN) + icons in $(DESTDIR)$(DATADIR)"
 
 test_network: tests/test_network.c src/network.c $(WBCOMMON)/wbcommon.h
 	$(CC) $(CFLAGS) -o $@ tests/test_network.c $(LDLIBS)
