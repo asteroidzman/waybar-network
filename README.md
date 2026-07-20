@@ -17,6 +17,8 @@ click-through popover with connection details, live throughput and a wifi list.
 
 ## Build & install
 
+Arch Linux: `yay -S waybar-network` (AUR).
+
 Requires `gtk3`, `glib2` (+dev headers), `NetworkManager` (`nmcli`) and a C compiler.
 
 ```sh
