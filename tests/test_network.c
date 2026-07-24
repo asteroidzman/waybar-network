@@ -53,6 +53,18 @@ int main(void) {
 	fmt_rate(1073741824.0, buf, sizeof buf);
 	CHECK_STR(buf, "1.0 GB/s", "fmt_rate(1073741824) crosses into GB/s");
 
+	// rate_from_delta: bytes/s from a counter delta over dt seconds. Guards the
+	// on-demand throughput sampler against fake spikes: a counter wrap/reset or
+	// a zero/absent dt (first sample after the popover opens) must read 0, not a
+	// huge or negative rate.
+	CHECK(rate_from_delta(1000, 2000, 1.0) == 1000.0, "rate_from_delta: 1000 bytes over 1s is 1000 B/s");
+	CHECK(rate_from_delta(1000, 2000, 2.0) == 500.0,  "rate_from_delta: 1000 bytes over 2s is 500 B/s");
+	CHECK(rate_from_delta(0, 5000, 0.5) == 10000.0,   "rate_from_delta: 5000 bytes over 0.5s is 10000 B/s");
+	CHECK(rate_from_delta(1000, 1000, 1.0) == 0.0,    "rate_from_delta: no counter change is 0 B/s");
+	CHECK(rate_from_delta(2000, 1000, 1.0) == 0.0,    "rate_from_delta: counter wrap/reset (cur<prev) is 0, never negative");
+	CHECK(rate_from_delta(1000, 2000, 0.0) == 0.0,    "rate_from_delta: zero dt (baseline sample) is 0, no fake spike");
+	CHECK(rate_from_delta(1000, 2000, -1.0) == 0.0,   "rate_from_delta: negative dt is 0 (defensive)");
+
 	printf("----\n%d failure(s)\n", failures);
 	return failures ? 1 : 0;
 }

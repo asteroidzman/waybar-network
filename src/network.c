@@ -3,7 +3,12 @@
 //  - Click → popover: connection details (SSID, signal, IP), live ↓/↑ throughput,
 //    a wifi toggle, and a scannable wifi list with click-to-connect (password
 //    entry for secured networks).
-//  - State via nmcli; throughput from /proc/net/dev. Refreshed every 3s.
+//  - State is EVENT-DRIVEN off `nmcli monitor` (a WbReader long-lived child):
+//    connect/disconnect refresh instantly instead of on a 3s poll, so an idle
+//    machine spawns no periodic nmcli pipeline. A slow timer (default 30s) only
+//    covers gradual wifi-signal drift, which emits no monitor event.
+//  - Throughput (↓/↑) is sampled from /proc/net/dev once a second, but ONLY
+//    while the popover is open -- that's the only place it's shown.
 #define _GNU_SOURCE
 #include <gtk/gtk.h>
 #include "wbcommon.h"
@@ -21,11 +26,16 @@ const size_t wbcffi_version = 1;
 #define IC_DL    "\xf3\xb0\x87\x87"   // 󰇇 (down arrow via text below instead)
 
 typedef struct {
-  GtkWidget *box, *icon, *label, *popover;
+  GtkWidget *box, *icon, *label, *popover, *thru_label;
   char type[16], ssid[128], ip[64], dev[32];
   int signal;
   unsigned long long rx, tx; double rx_rate, tx_rate;   // bytes, bytes/s
-  int interval; guint timer; GCancellable *cancel;
+  gint64 thru_last_us;             // monotonic ts of the last rx/tx sample
+  int interval; GCancellable *cancel;
+  WbReader *mon;                   // `nmcli monitor`: state changes drive refresh
+  guint mon_debounce;              // coalesce a burst of monitor lines into one fetch
+  guint sig_timer;                 // slow refresh so idle wifi signal% doesn't go stale
+  guint thru_timer;                // 1s throughput sampler; runs only while popover open
   GtkWidget *pw_entry, *pw_row; char pw_ssid[128];
   char *icon_dir; int icon_size;
   WbPop pop;
@@ -63,6 +73,13 @@ static void fmt_rate(double bps, char *out, size_t n) {
   else g_snprintf(out, n, "%.1f GB/s", bps / 1073741824.0);
 }
 
+// bytes/s from a counter delta over dt seconds; 0 on wrap, first sample, or no
+// elapsed time (so a stale baseline never reads as a huge fake spike).
+static double rate_from_delta(unsigned long long prev, unsigned long long cur, double dt) {
+  if (dt <= 0 || cur <= prev) return 0;
+  return (double)(cur - prev) / dt;
+}
+
 // ─── /proc/net/dev throughput for the active device ──────────────────────────
 static void read_throughput(Inst *self) {
   if (!self->dev[0]) { self->rx_rate = self->tx_rate = 0; return; }
@@ -78,12 +95,16 @@ static void read_throughput(Inst *self) {
   }
   fclose(f);
   if (found) {
-    double dt = self->interval;
-    if (self->rx || self->tx) {
-      self->rx_rate = rx > self->rx ? (rx - self->rx) / dt : 0;
-      self->tx_rate = tx > self->tx ? (tx - self->tx) / dt : 0;
+    // Real elapsed time between samples: reads are now event/on-demand, not on
+    // a fixed cadence, so a hardcoded dt would misreport rates. thru_last_us==0
+    // marks the first sample after (re)starting sampling -- baseline only.
+    gint64 now = g_get_monotonic_time();
+    double dt = self->thru_last_us ? (double)(now - self->thru_last_us) / 1e6 : 0;
+    if (dt > 0) {
+      self->rx_rate = rate_from_delta(self->rx, rx, dt);
+      self->tx_rate = rate_from_delta(self->tx, tx, dt);
     }
-    self->rx = rx; self->tx = tx;
+    self->rx = rx; self->tx = tx; self->thru_last_us = now;
   }
 }
 
@@ -149,6 +170,18 @@ static void fetch_state(Inst *self) {
   g_object_unref(sp);
 }
 
+// ─── event-driven refresh via `nmcli monitor` ────────────────────────────────
+static gboolean do_state_fetch(gpointer d) {
+  Inst *self = d; self->mon_debounce = 0; fetch_state(self); return G_SOURCE_REMOVE;
+}
+// `nmcli monitor` prints a line (often several) on any connectivity/device
+// change. We don't parse them -- each just triggers a structured re-fetch,
+// debounced so a burst during a connect doesn't spawn STATE_CMD many times.
+static void on_monitor_line(const char *line, gpointer user) {
+  Inst *self = user; (void)line;
+  if (!self->mon_debounce) self->mon_debounce = g_timeout_add(400, do_state_fetch, self);
+}
+
 // ─── wifi actions ────────────────────────────────────────────────────────────
 static void rebuild_popover(Inst *self);
 static void nm_async(const char *const *argv) {
@@ -201,7 +234,30 @@ static void on_wifi_toggle(GtkButton *b, gpointer d) {
 // ─── popover ─────────────────────────────────────────────────────────────────
 static void rebuild_popover(Inst *self);
 static void wbpop_rebuild_cb(gpointer user) { rebuild_popover(user); }
-static void pop_show(Inst *self) { wbpop_show(&self->pop); }
+
+// Sample throughput once a second, but only while the popover is open -- that's
+// the only place ↓/↑ rates are shown. Self-removes when the popover is hidden
+// by ANY path (click, Escape, focus-loss), since wbcommon hides it directly and
+// never calls pop_hide below.
+static gboolean thru_tick(gpointer d) {
+  Inst *self = d;
+  if (!wbpop_visible(&self->pop)) { self->thru_timer = 0; return G_SOURCE_REMOVE; }
+  read_throughput(self);
+  if (self->thru_label) {
+    char dn[24], up[24]; fmt_rate(self->rx_rate, dn, sizeof dn); fmt_rate(self->tx_rate, up, sizeof up);
+    char thru[64]; g_snprintf(thru, sizeof thru, "\xe2\x86\x93 %s   \xe2\x86\x91 %s", dn, up);
+    gtk_label_set_text(GTK_LABEL(self->thru_label), thru);
+  }
+  return G_SOURCE_CONTINUE;
+}
+static void pop_show(Inst *self) {
+  // Fresh throughput baseline so the first live sample measures from "now", not
+  // from whenever the counters were last read (which could be minutes ago).
+  self->thru_last_us = 0; self->rx = self->tx = 0; self->rx_rate = self->tx_rate = 0;
+  read_throughput(self);   // seed baseline; the 1s tick then shows real rates
+  wbpop_show(&self->pop);
+  if (!self->thru_timer) self->thru_timer = g_timeout_add_seconds(1, thru_tick, self);
+}
 static void pop_hide(Inst *self) { wbpop_hide(&self->pop); }
 static GtkWidget *info_row(const char *k, const char *v) {
   GtkWidget *r = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -237,6 +293,7 @@ static void rebuild_popover(Inst *self) {
   char thru[64]; g_snprintf(thru, sizeof thru, "\xe2\x86\x93 %s   \xe2\x86\x91 %s", dn, up);
   GtkWidget *tl = gtk_label_new(thru); gtk_widget_set_halign(tl, GTK_ALIGN_START);
   gtk_style_context_add_class(gtk_widget_get_style_context(tl), "nw-thru");
+  self->thru_label = tl;   // thru_tick updates this in place while the popover is open
   gtk_box_pack_start(GTK_BOX(v), tl, FALSE, FALSE, 2);
 
   gtk_box_pack_start(GTK_BOX(v), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 2);
@@ -299,16 +356,21 @@ static gboolean on_click(GtkWidget *w, GdkEventButton *ev, gpointer data) {
   fetch_state(self); if (gtk_widget_get_visible(self->popover)) pop_hide(self); else pop_show(self);
   return TRUE;
 }
-static gboolean tick(gpointer data) { fetch_state(data); return G_SOURCE_CONTINUE; }
+// Slow periodic re-fetch so a gradually changing wifi signal% (which emits no
+// monitor event) doesn't sit stale on the bar. Far rarer than the old 3s poll;
+// connect/disconnect is handled instantly by `nmcli monitor`.
+static gboolean sig_refresh(gpointer data) { fetch_state(data); return G_SOURCE_CONTINUE; }
 
 static GtkWidget *mklabel(const char *t, const char *cls) {
   GtkWidget *l = gtk_label_new(t); gtk_widget_set_valign(l, GTK_ALIGN_CENTER); gtk_style_context_add_class(gtk_widget_get_style_context(l), cls); return l;
 }
 void *wbcffi_init(const wbcffi_init_info *info, const wbcffi_config_entry *entries, size_t entries_len) {
   Inst *self = g_new0(Inst, 1);
-  self->interval = 3; self->signal = -1; self->icon_size = 24;
+  self->interval = 30; self->signal = -1; self->icon_size = 24;
   for (size_t i = 0; i < entries_len; i++) {
-    if (!strcmp(entries[i].key, "interval")) { self->interval = atoi(entries[i].value); if (self->interval < 1) self->interval = 1; }
+    // `interval` is now just the slow signal-drift refresh cadence, not the
+    // (removed) state poll -- connect/disconnect is event-driven. Floor at 5s.
+    if (!strcmp(entries[i].key, "interval")) { self->interval = atoi(entries[i].value); if (self->interval < 5) self->interval = 5; }
     else if (!strcmp(entries[i].key, "icon-size")) { self->icon_size = atoi(entries[i].value); if (self->icon_size < 8) self->icon_size = 8; }
     else if (!strcmp(entries[i].key, "icon-dir")) { g_free(self->icon_dir); self->icon_dir = g_strdup(entries[i].value); }
   }
@@ -341,14 +403,19 @@ void *wbcffi_init(const wbcffi_init_info *info, const wbcffi_config_entry *entri
   gtk_widget_show_all(GTK_WIDGET(root));
 
   fetch_state(self);
-  self->timer = g_timeout_add_seconds(self->interval, tick, self);
+  const char *mon_argv[] = {"nmcli", "monitor", NULL};
+  self->mon = wb_reader_start(mon_argv, on_monitor_line, self, G_PRIORITY_DEFAULT);
+  self->sig_timer = g_timeout_add_seconds(self->interval, sig_refresh, self);
   return self;
 }
 void wbcffi_deinit(void *instance) {
   Inst *self = instance;
   wbpop_destroy(&self->pop);
   if (self->cancel) g_cancellable_cancel(self->cancel);
-  if (self->timer) g_source_remove(self->timer);
+  if (self->mon) wb_reader_free(self->mon);
+  if (self->mon_debounce) g_source_remove(self->mon_debounce);
+  if (self->sig_timer) g_source_remove(self->sig_timer);
+  if (self->thru_timer) g_source_remove(self->thru_timer);
   g_clear_object(&self->cancel);
   g_free(self->icon_dir);
   g_free(self);
